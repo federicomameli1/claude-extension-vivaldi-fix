@@ -80,6 +80,15 @@ You'll see the normal Claude login / chat UI in Vivaldi's side panel. Two harmle
 - `Executing inline script violates ... Content Security Policy` on `sidepanel.html:8` — the extension's dark-mode-preference inline script. Skipping it means no auto-detect of system dark mode on first paint.
 - `Loading the script 'https://cdn.segment.com/...'` — analytics script blocked by the extension's own CSP.
 
+## Extension 1.0.94+: "Can't reach the Claude extension"
+
+Since 1.0.94 the side panel embeds claude.ai, and the static path alone is no longer enough: the panel renders but shows **"Can't reach the Claude extension."** ([anthropics/claude-code#95975](https://github.com/anthropics/claude-code/issues/95975)). Vivaldi hosts side panels inside a tab, which breaks two assumptions. `install.ps1` patches both:
+
+1. **`tabId` binding.** The service worker opens `sidepanel.html?tabId=N` through `setOptions()`, which Vivaldi ignores. Without `tabId` the panel never connects to the service worker. The script adds `vivaldi-tabid.js`, which binds the panel to the active tab on load and rebinds it when the bound tab closes. To switch tabs, close and reopen the panel.
+2. **Sender checks.** The service worker treats a sender as the side panel only when `sender.tab === undefined`. In Vivaldi the panel and its claude.ai frame both have a `tab`, so every request fails with `sender is not an extension page`. The script changes these checks to compare the sender URL with the extension's own pages, which still rejects content scripts and web pages.
+
+Tested on Windows 11 with extension 1.0.100: chat, navigation, typing, page reading and screenshots all work. `install.sh` does not apply these patches yet.
+
 ## Troubleshooting
 
 ### The patched extension won't load — "duplicate extension ID" error

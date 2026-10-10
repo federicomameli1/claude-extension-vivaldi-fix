@@ -104,6 +104,69 @@ $json = $manifest | ConvertTo-Json -Depth 20
 [System.IO.File]::WriteAllText($manifestPath, $json, (New-Object System.Text.UTF8Encoding $false))
 Write-Ok "Added side_panel.default_path, removed update_url"
 
+# --- 4b. Inject tabId when the static path omits it ---------------------------
+# The service worker normally opens `sidepanel.html?tabId=N`; without tabId the panel
+# never connects to the service worker and claude.ai shows "Can't reach the Claude
+# extension". Gate the main module behind a loader that adds the active tab's id.
+# ponytail: binds to the tab active when the panel opens; reopen the panel to rebind.
+Write-Step "Patching sidepanel.html (tabId loader)"
+$htmlPath = Join-Path $Destination 'sidepanel.html'
+$html = [System.IO.File]::ReadAllText($htmlPath)
+$m = [regex]::Match($html, '<script type="module" crossorigin src="(/assets/sidepanel-[^"]+\.js)"></script>')
+if (-not $m.Success) { Write-Err2 "sidepanel module tag not found; extension layout changed."; exit 1 }
+# Vivaldi remembers the panel URL, so a stale ?tabId survives reopening: always
+# rebind to the active tab on load, and again when the bound tab is closed.
+$loader = @"
+(function () {
+  var q = new URLSearchParams(location.search);
+  function boot() {
+    var s = document.createElement('script');
+    s.type = 'module'; s.crossOrigin = ''; s.src = '$($m.Groups[1].Value)';
+    document.head.appendChild(s);
+  }
+  function rebind(id) { q.set('tabId', id); location.replace('sidepanel.html?' + q); }
+  if (q.get('mode') === 'window') return boot();
+  chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
+    var active = tabs.filter(function (t) { return !t.url || !t.url.startsWith(location.origin); })[0];
+    if (active && String(active.id) !== q.get('tabId')) return rebind(active.id);
+    boot();
+    chrome.tabs.onRemoved.addListener(function (id) {
+      if (String(id) !== q.get('tabId')) return;
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (t) { if (t[0]) rebind(t[0].id); });
+    });
+  });
+})();
+"@
+[System.IO.File]::WriteAllText((Join-Path $Destination 'vivaldi-tabid.js'), $loader, (New-Object System.Text.UTF8Encoding $false))
+$html = $html.Replace($m.Value, '<script src="/vivaldi-tabid.js"></script>')
+[System.IO.File]::WriteAllText($htmlPath, $html, (New-Object System.Text.UTF8Encoding $false))
+Write-Ok "Added vivaldi-tabid.js loader"
+
+# --- 4c. Accept the side panel as an extension page ---------------------------
+# The service worker only trusts senders with no `tab` (true for Chrome's side panel),
+# but Vivaldi hosts the panel in a tab, so every panel request is rejected
+# ("sender is not an extension page"). Check the sender URL instead: still excludes
+# content scripts and web pages.
+Write-Step "Patching service worker sender check"
+$swPath = (Get-ChildItem (Join-Path $Destination 'assets') -Filter 'service-worker*.js' | Select-Object -First 1).FullName
+$sw = [System.IO.File]::ReadAllText($swPath)
+$re = 'return void 0===(\w)\.tab&&\1\.id===chrome\.runtime\.id\}'
+if (-not [regex]::IsMatch($sw, $re)) { Write-Err2 "sender check not found; extension layout changed."; exit 1 }
+$sw = [regex]::Replace($sw, $re, 'return $1.id===chrome.runtime.id&&($1.url||"").startsWith(chrome.runtime.getURL(""))}')
+# Same for claude.ai framed in the panel (onMessageExternal): its sender.tab is the
+# panel's own tab, so trust it when that tab is sidepanel.html.
+$inPanel = '(void 0===$1.tab||($1.tab.url||"").startsWith(chrome.runtime.getURL("sidepanel.html")))'
+$n = 0
+foreach ($p in @(
+    @{ re = '(?<="get_sidepanel_host_info"===\w\.type\)try\{const \w=)void 0===(\w)\.tab'; to = $inPanel },
+    @{ re = '(?<=\(ho\.includes\(\w\.type\)\)\{if\()void 0!==(\w)\.tab'; to = "!$inPanel" }
+)) {
+    if ([regex]::IsMatch($sw, $p.re)) { $sw = [regex]::Replace($sw, $p.re, $p.to); $n++ }
+}
+if ($n -lt 2) { Write-Warn2 "Only $n/2 external sender checks patched; extension layout changed." }
+[System.IO.File]::WriteAllText($swPath, $sw, (New-Object System.Text.UTF8Encoding $false))
+Write-Ok "Sender checks now URL-based"
+
 # --- 5. Verify native messaging host registration ----------------------------
 Write-Step "Checking native-messaging host registration for Vivaldi"
 $nmKey = 'HKCU:\Software\Vivaldi\NativeMessagingHosts\com.anthropic.claude_browser_extension'
