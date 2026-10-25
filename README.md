@@ -2,6 +2,9 @@
 
 Make the official **Claude for Chrome** extension render in **Vivaldi**'s side panel instead of opening blank.
 
+> [!IMPORTANT]
+> This is a maintained fork of [bigbrojake/claude-extension-vivaldi-fix](https://github.com/bigbrojake/claude-extension-vivaldi-fix). It adds the fixes needed for extension **1.0.94+**, where the panel shows "Can't reach the Claude extension" (see [below](#extension-1094-cant-reach-the-claude-extension)). They were submitted upstream in [bigbrojake/claude-extension-vivaldi-fix#2](https://github.com/bigbrojake/claude-extension-vivaldi-fix/pull/2).
+
 > [!NOTE]
 > This is a community patch, not affiliated with Anthropic or Vivaldi. It modifies a local copy of the extension's `manifest.json` on your own machine — no Anthropic code is redistributed by this repository.
 
@@ -38,7 +41,7 @@ That's the entire functional change. The `"key"` field is preserved so the exten
 ### Windows (PowerShell)
 
 ```powershell
-git clone https://github.com/bigbrojake/claude-extension-vivaldi-fix.git
+git clone https://github.com/federicomameli1/claude-extension-vivaldi-fix.git
 cd claude-extension-vivaldi-fix
 .\scripts\install.ps1
 ```
@@ -56,7 +59,7 @@ The script will:
 > The bash script is provided but **untested**. Please open an issue with your output if you run it.
 
 ```bash
-git clone https://github.com/bigbrojake/claude-extension-vivaldi-fix.git
+git clone https://github.com/federicomameli1/claude-extension-vivaldi-fix.git
 cd claude-extension-vivaldi-fix
 ./scripts/install.sh
 ```
