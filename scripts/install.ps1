@@ -167,15 +167,42 @@ Write-Step "Patching service worker sender check"
 $swPath = (Get-ChildItem (Join-Path $Destination 'assets') -Filter 'service-worker*.js' | Select-Object -First 1).FullName
 $sw = [System.IO.File]::ReadAllText($swPath)
 $re = 'return void 0===(\w)\.tab&&\1\.id===chrome\.runtime\.id\}'
-if (-not [regex]::IsMatch($sw, $re)) { Write-Err2 "sender check not found; extension layout changed."; exit 1 }
-$sw = [regex]::Replace($sw, $re, 'return $1.id===chrome.runtime.id&&($1.url||"").startsWith(chrome.runtime.getURL(""))}')
+if ([regex]::IsMatch($sw, $re)) {
+    # Extension <= 1.0.106: the check is inline in the service worker.
+    $sw = [regex]::Replace($sw, $re, 'return $1.id===chrome.runtime.id&&($1.url||"").startsWith(chrome.runtime.getURL(""))}')
+    Write-Ok "Inline sender check patched (<= 1.0.106 layout)"
+} else {
+    # Extension 1.0.107+: the check moved to a shared helper in another chunk and
+    # already verifies id + extension URL, so only the `tab === undefined` clause goes.
+    $helperRe = '(function \w+\((\w)\)\{return void 0!==\2&&)void 0===\2\.tab&&(\2\.id===chrome\.runtime\.id&&"string"==typeof \2\.url&&\2\.url\.startsWith\(`chrome-extension://\$\{chrome\.runtime\.id\}/`\))'
+    $helperHits = 0
+    foreach ($f in Get-ChildItem (Join-Path $Destination 'assets') -Filter '*.js') {
+        $c = [System.IO.File]::ReadAllText($f.FullName)
+        if ([regex]::IsMatch($c, $helperRe)) {
+            $c = [regex]::Replace($c, $helperRe, '$1$3')
+            [System.IO.File]::WriteAllText($f.FullName, $c, (New-Object System.Text.UTF8Encoding $false))
+            if ($f.FullName -eq $swPath) { $sw = $c }
+            $helperHits++
+        }
+    }
+    if ($helperHits -eq 0) { Write-Err2 "sender check not found; extension layout changed."; exit 1 }
+    Write-Ok "Shared sender check patched in $helperHits file(s) (1.0.107+ layout)"
+    # 1.0.107+ also requires the panel's tabId in the sender URL, which the loader
+    # deliberately leaves untouched. Fall back to the panelTabId the panel sends.
+    $tabRe = 'const (\w)=(\w+)\((\w)\.url\),(\w)=(\w)\.panelTabId;if\(void 0===\1\|\|'
+    if ([regex]::IsMatch($sw, $tabRe)) {
+        $sw = [regex]::Replace($sw, $tabRe, 'const $4=$5.panelTabId,$1=$2($3.url)??(Number.isInteger($4)?$4:void 0);if(void 0===$1||')
+        Write-Ok "panelTabId check falls back to the panel's own tabId"
+    } else { Write-Warn2 "panelTabId check not found; panel may report a tab mismatch." }
+}
 # Same for claude.ai framed in the panel (onMessageExternal): its sender.tab is the
 # panel's own tab, so trust it when that tab is sidepanel.html.
 $inPanel = '(void 0===$1.tab||($1.tab.url||"").startsWith(chrome.runtime.getURL("sidepanel.html")))'
 $n = 0
 foreach ($p in @(
     @{ re = '(?<="get_sidepanel_host_info"===\w\.type\)try\{const \w=)void 0===(\w)\.tab'; to = $inPanel },
-    @{ re = '(?<=\(ho\.includes\(\w\.type\)\)\{if\()void 0!==(\w)\.tab'; to = "!$inPanel" }
+    # The array name changes between builds (ho, vc, ...), so match any identifier.
+    @{ re = '(?<=\w+\.includes\(\w\.type\)\)\{if\()void 0!==(\w)\.tab(?=\|\|!\w+\(\1\.origin\))'; to = "!$inPanel" }
 )) {
     if ([regex]::IsMatch($sw, $p.re)) { $sw = [regex]::Replace($sw, $p.re, $p.to); $n++ }
 }
@@ -185,6 +212,21 @@ $sw = $sw.Replace('catch(t){return{ok:!1,error:"anchor tab-group initialization 
 
 [System.IO.File]::WriteAllText($swPath, $sw, (New-Object System.Text.UTF8Encoding $false))
 Write-Ok "Sender checks now URL-based"
+
+# --- 4c2. Don't refuse the panel because it lives in a tab --------------------
+# 1.0.107+: the panel calls chrome.tabs.getCurrent(); in Chrome that is undefined for a
+# side panel. In Vivaldi it returns the hosting tab, and getContexts() does not report
+# SIDE_PANEL, so the panel renders "Claude isn't available on this page". Keep the
+# framed and handover-window checks, but accept the remaining case as the side panel.
+Write-Step "Patching side panel window check"
+$panelPath = Join-Path $Destination ($m.Groups[1].Value.TrimStart('/'))
+$panel = [System.IO.File]::ReadAllText($panelPath)
+$refuseRe = 'e=\w\?"no_handover":"unlisted_not_side_panel"\}\}\}catch\((\w+)\)\{e="check_failed"\}return\{kind:"refused",reason:e\}\}'
+if ([regex]::IsMatch($panel, $refuseRe)) {
+    $panel = [regex]::Replace($panel, $refuseRe, 'return{kind:"sidePanel"}}}}catch($1){e="check_failed"}return{kind:"refused",reason:e}}')
+    [System.IO.File]::WriteAllText($panelPath, $panel, (New-Object System.Text.UTF8Encoding $false))
+    Write-Ok "Panel accepts being hosted in a Vivaldi tab"
+} else { Write-Warn2 "Window check not found (older build or layout changed); skipping." }
 
 # --- 4d. Emulate tab groups ---------------------------------------------------
 # Vivaldi 8.3: chrome.tabs.group() returns an id but groups nothing, so every
